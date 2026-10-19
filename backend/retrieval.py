@@ -11,11 +11,11 @@ from urllib.parse import urlparse
 from openai.types.chat import ChatCompletionMessageParam
 
 if __package__:
-    from .github_catalog import CATALOG_PATH, load_catalog, safe_http_url
+    from .github_catalog import load_catalog, safe_http_url
     from .knowledge_store import create_knowledge_store
     from .storage import KnowledgeStore
 else:
-    from github_catalog import CATALOG_PATH, load_catalog, safe_http_url
+    from github_catalog import load_catalog, safe_http_url
     from knowledge_store import create_knowledge_store
     from storage import KnowledgeStore
 
@@ -429,7 +429,7 @@ def retrieve_sources(
     *,
     catalog: dict[str, Any] | None = None,
     profile_data_dir: Path = PROFILE_DATA_DIR,
-    catalog_path: Path = CATALOG_PATH,
+    catalog_path: Path | None = None,
     max_sources: int = MAX_EVIDENCE_SOURCES,
     max_chars: int = MAX_EVIDENCE_CHARS,
     knowledge_store: KnowledgeStore | None = None,
@@ -598,7 +598,7 @@ def build_grounded_messages(
     *,
     catalog: dict[str, Any] | None = None,
     profile_data_dir: Path = PROFILE_DATA_DIR,
-    catalog_path: Path = CATALOG_PATH,
+    catalog_path: Path | None = None,
     knowledge_store: KnowledgeStore | None = None,
 ) -> list[ChatCompletionMessageParam]:
     evidence = retrieve_sources(
