@@ -272,10 +272,8 @@ class RedisKnowledgeStore(KnowledgeStore):
         return document
 
     def delete(self, document_id: str) -> None:
-        pipeline = self.client.pipeline()
-        pipeline.delete(self._key(document_id))
-        pipeline.srem(REDIS_KNOWLEDGE_INDEX_KEY, document_id)
-        pipeline.execute()
+        # Deleting a missing key is a no-op in Redis.
+        self.client.delete(self._key(document_id))
 
     def list_ids(self) -> list[str]:
         ids = []

@@ -11,7 +11,6 @@ from unittest.mock import patch
 import github_catalog
 import knowledge_store
 from knowledge_store import (
-    REDIS_KNOWLEDGE_INDEX_KEY,
     LocalKnowledgeStore,
     RedisKnowledgeStore,
     create_knowledge_store,
@@ -47,16 +46,15 @@ class RedisKnowledgeStoreTests(unittest.TestCase):
 
         self.assertIsNone(store.get("github:Uzu-mak/missing:README.md"))
 
-    def test_overwrite_keeps_single_index_entry(self):
-        client = FakeRedis()
-        store = RedisKnowledgeStore(redis_url="", redis_client=client)
+    def test_overwrite_keeps_single_document(self):
+        store = RedisKnowledgeStore(redis_url="", redis_client=FakeRedis())
 
         store.put(make_document())
         store.put(make_document())
 
-        self.assertEqual(len(client.smembers(REDIS_KNOWLEDGE_INDEX_KEY)), 1)
+        self.assertEqual(len(store.list_ids()), 1)
 
-    def test_delete_removes_document_and_index_entry(self):
+    def test_delete_removes_document(self):
         client = FakeRedis()
         store = RedisKnowledgeStore(redis_url="", redis_client=client)
         document = make_document()

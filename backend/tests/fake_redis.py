@@ -1,6 +1,6 @@
 """In-memory stand-in for the redis-py calls used by the backend.
 
-Covers strings, sets, MULTI/EXEC pipelines and the compare-and-delete
+Covers strings, MSET, SCAN, sets, pipelines and the compare-and-delete
 lock-release script. Set ``fail = True`` to simulate an unreachable Redis.
 """
 
@@ -78,6 +78,19 @@ class FakeRedis:
     def smembers(self, key):
         self._check()
         return set(self.sets.get(key, set()))
+
+    def mset(self, mapping):
+        self._check()
+        self.values.update(mapping)
+        return True
+
+    def scan_iter(self, match=None, count=None):
+        self._check()
+        prefix = match[:-1] if match and match.endswith("*") else match or ""
+
+        for key in list(self.values):
+            if key.startswith(prefix):
+                yield key
 
     def pipeline(self, transaction=True):
         return FakePipeline(self)

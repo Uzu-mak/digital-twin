@@ -764,26 +764,24 @@ def _parse_catalog(raw: Any, label: str) -> dict[str, Any]:
 def _write_redis_catalog(catalog: dict[str, Any]) -> None:
     """Publish a catalog and keep the one it replaces for rollback.
 
-    The new catalog and the previous-snapshot copy are written in one
-    MULTI/EXEC transaction, so readers see either the old catalog or the
-    new one, never a mix.
+    The new catalog and the previous-snapshot copy are written with one
+    MSET, which Redis applies atomically, so readers see either the old
+    catalog or the new one, never a mix.
     """
     validated = _validate_catalog(catalog)
     client = _redis_catalog_client()
+    serialized = json.dumps(validated, ensure_ascii=False)
 
     try:
         current = client.get(REDIS_CATALOG_KEY)
 
-        pipeline = client.pipeline(transaction=True)
-
-        if current is not None:
-            pipeline.set(REDIS_PREVIOUS_CATALOG_KEY, current)
-
-        pipeline.set(
-            REDIS_CATALOG_KEY,
-            json.dumps(validated, ensure_ascii=False),
-        )
-        pipeline.execute()
+        if current is None:
+            client.set(REDIS_CATALOG_KEY, serialized)
+        else:
+            client.mset({
+                REDIS_PREVIOUS_CATALOG_KEY: current,
+                REDIS_CATALOG_KEY: serialized,
+            })
 
     except _redis_errors() as error:
         raise GitHubStorageError(
@@ -824,13 +822,13 @@ def _rollback_redis_catalog() -> dict[str, Any]:
 
         restored = _parse_catalog(previous, "previous Redis")
 
-        pipeline = client.pipeline(transaction=True)
-        pipeline.set(REDIS_CATALOG_KEY, previous)
-
-        if current is not None:
-            pipeline.set(REDIS_PREVIOUS_CATALOG_KEY, current)
-
-        pipeline.execute()
+        if current is None:
+            client.set(REDIS_CATALOG_KEY, previous)
+        else:
+            client.mset({
+                REDIS_CATALOG_KEY: previous,
+                REDIS_PREVIOUS_CATALOG_KEY: current,
+            })
 
     except _redis_errors() as error:
         raise GitHubStorageError(
