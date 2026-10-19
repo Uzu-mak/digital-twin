@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+openai
+python-dotenv
+python-multipart
+boto3
+pypdf
+mangum
+httpx
+redis>=5,<7

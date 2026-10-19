@@ -207,26 +207,105 @@ class S3KnowledgeStore(KnowledgeStore):
 
 
 # --------------------------------------------------
+# Redis knowledge storage (Upstash)
+# --------------------------------------------------
+
+class RedisKnowledgeStore(KnowledgeStore):
+
+    PREFIX = "digital-twin:github:documents:"
+
+    def __init__(self, redis_url=None, redis_client=None):
+        if redis_client is None:
+            if not redis_url:
+                raise ValueError("Redis URL is required")
+
+            import redis
+
+            redis_client = redis.Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=5,
+                socket_timeout=5,
+            )
+
+        self.client = redis_client
+
+    def _key(self, document_id: str) -> str:
+        filename = document_key(document_id).split("/")[-1]
+        return f"{self.PREFIX}{filename}"
+
+    def put(self, document: KnowledgeDocument) -> None:
+        self.client.set(
+            self._key(document.document_id),
+            serialize_document(document),
+        )
+
+    def get(self, document_id: str) -> KnowledgeDocument | None:
+        data = self.client.get(
+            self._key(document_id)
+        )
+
+        if data is None:
+            return None
+
+        document = deserialize_document(data)
+
+        if document.document_id != document_id:
+            raise ValueError(
+                "Knowledge document ID mismatch"
+            )
+
+        return document
+
+    def list_ids(self) -> list[str]:
+        ids = []
+
+        for key in self.client.scan_iter(
+            match=f"{self.PREFIX}*",
+            count=100,
+        ):
+            data = self.client.get(key)
+
+            if data is None:
+                continue
+
+            document = deserialize_document(data)
+            ids.append(document.document_id)
+
+        return sorted(ids)
+
+
+# --------------------------------------------------
 # Storage factory
 # --------------------------------------------------
 
 def create_knowledge_store() -> KnowledgeStore:
-    use_s3 = os.getenv(
-        "USE_S3",
-        "false",
-    ).lower() == "true"
+    backend = os.getenv(
+        "KNOWLEDGE_STORE_BACKEND",
+        "local",
+    ).strip().lower()
 
-    if use_s3:
+    if backend == "redis":
+        return RedisKnowledgeStore(
+            redis_url=os.getenv("REDIS_URL", "")
+        )
+
+    if backend == "s3" or (
+        backend == "local"
+        and os.getenv("USE_S3", "false").lower() == "true"
+    ):
         return S3KnowledgeStore(
-            bucket=os.getenv(
-                "S3_KNOWLEDGE_BUCKET",
-                "",
+            bucket=os.getenv("S3_KNOWLEDGE_BUCKET", "")
+        )
+
+    if backend == "local":
+        return LocalKnowledgeStore(
+            directory=os.getenv(
+                "KNOWLEDGE_DIR",
+                "../knowledge",
             )
         )
 
-    return LocalKnowledgeStore(
-        directory=os.getenv(
-            "KNOWLEDGE_DIR",
-            "../knowledge",
-        )
+    raise ValueError(
+        f"Unsupported knowledge storage backend: {backend}"
     )

@@ -1,0 +1,63 @@
+
+# --------------------------------------------------
+# Redis GitHub catalog storage
+# --------------------------------------------------
+
+REDIS_CATALOG_KEY = "digital-twin:github:catalog"
+
+
+def _validate_catalog(catalog: Any) -> dict[str, Any]:
+    if (
+        not isinstance(catalog, dict)
+        or not isinstance(catalog.get("repositories"), list)
+    ):
+        raise GitHubSyncError(
+            "The GitHub catalog has an invalid format."
+        )
+
+    return catalog
+
+
+def _redis_catalog_client():
+    redis_url = os.getenv("REDIS_URL", "").strip()
+
+    if not redis_url:
+        raise GitHubSyncError(
+            "Redis catalog storage is not configured."
+        )
+
+    import redis
+
+    return redis.Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+    )
+
+
+def _write_redis_catalog(catalog: dict[str, Any]) -> None:
+    validated = _validate_catalog(catalog)
+    client = _redis_catalog_client()
+
+    client.set(
+        REDIS_CATALOG_KEY,
+        json.dumps(validated, ensure_ascii=False),
+    )
+
+
+def _load_redis_catalog() -> dict[str, Any] | None:
+    client = _redis_catalog_client()
+    raw = client.get(REDIS_CATALOG_KEY)
+
+    if raw is None:
+        return None
+
+    try:
+        catalog = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise GitHubSyncError(
+            "The Redis GitHub catalog is invalid."
+        ) from error
+
+    return _validate_catalog(catalog)
