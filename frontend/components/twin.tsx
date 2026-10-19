@@ -13,6 +13,10 @@ interface Message {
   isError?: boolean;
 }
 
+const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+).replace(/\/+$/, "");
+
 const suggestedQuestions = [
   "What areas of AI systems do I focus on?",
   "Tell me about AegisOps AI.",
@@ -50,7 +54,7 @@ export default function Twin() {
     setIsLoading(true);
 
     try {
-      const response = await fetch("http://localhost:8000/chat", {
+      const response = await fetch(`${API_BASE_URL}/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -61,13 +65,15 @@ export default function Twin() {
         }),
       });
 
-      if (!response.ok)
+      if (!response.ok) {
         throw new Error(`Chat request failed with status ${response.status}`);
+      }
 
       const data = (await response.json()) as {
         response?: unknown;
         session_id?: unknown;
       };
+
       if (
         typeof data.response !== "string" ||
         typeof data.session_id !== "string"
@@ -89,7 +95,7 @@ export default function Twin() {
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
       console.error("Error:", error);
-      // Add error message
+
       const errorMessage: Message = {
         id: String(++messageIdRef.current),
         role: "assistant",
@@ -97,6 +103,7 @@ export default function Twin() {
         timestamp: new Date(),
         isError: true,
       };
+
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
@@ -109,10 +116,12 @@ export default function Twin() {
         <div className="twin-heading-mark">
           <Bot aria-hidden="true" size={19} />
         </div>
+
         <div>
           <p className="twin-kicker">AI DIGITAL TWIN</p>
           <h3>Jeremiah, in conversation</h3>
         </div>
+
         <span className="twin-status">EMBEDDED CHAT</span>
       </div>
 
@@ -127,11 +136,14 @@ export default function Twin() {
             <div className="welcome-icon">
               <Sparkles aria-hidden="true" size={19} />
             </div>
+
             <p className="welcome-title">Where should we start?</p>
+
             <p className="welcome-copy">
               Ask about my engineering background, AI interests, or selected
               work.
             </p>
+
             <div
               className="suggested-questions"
               aria-label="Suggested questions"
@@ -152,11 +164,15 @@ export default function Twin() {
 
         {messages.map((message) => (
           <div
-            className={`message-row ${message.role === "user" ? "message-user" : "message-assistant"}`}
+            className={`message-row ${
+              message.role === "user" ? "message-user" : "message-assistant"
+            }`}
             key={message.id}
           >
             <div
-              className={`message-avatar ${message.role === "user" ? "message-avatar-user" : ""}`}
+              className={`message-avatar ${
+                message.role === "user" ? "message-avatar-user" : ""
+              }`}
             >
               {message.role === "user" ? (
                 <User aria-hidden="true" size={15} />
@@ -164,15 +180,20 @@ export default function Twin() {
                 <Bot aria-hidden="true" size={16} />
               )}
             </div>
+
             <div
-              className={`message-bubble ${message.isError ? "message-error" : ""}`}
+              className={`message-bubble ${
+                message.isError ? "message-error" : ""
+              }`}
             >
               <div className="message-meta">
                 <span>{message.role === "user" ? "You" : "Digital Twin"}</span>
+
                 {message.isError && (
                   <span className="error-label">REQUEST ISSUE</span>
                 )}
               </div>
+
               <div className="markdown-body">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
@@ -187,6 +208,7 @@ export default function Twin() {
                   {message.content}
                 </ReactMarkdown>
               </div>
+
               <time
                 className="message-time"
                 dateTime={message.timestamp.toISOString()}
@@ -209,6 +231,7 @@ export default function Twin() {
             <div className="message-avatar">
               <Bot aria-hidden="true" size={16} />
             </div>
+
             <div className="typing-indicator" aria-hidden="true">
               <span />
               <span />
@@ -216,6 +239,7 @@ export default function Twin() {
             </div>
           </div>
         )}
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -229,6 +253,7 @@ export default function Twin() {
         <label className="sr-only" htmlFor="twin-message">
           Message the Digital Twin
         </label>
+
         <textarea
           id="twin-message"
           value={input}
@@ -244,9 +269,11 @@ export default function Twin() {
           disabled={isLoading}
           aria-describedby="twin-composer-hint"
         />
+
         <span className="sr-only" id="twin-composer-hint">
           Press Enter to send. Use Shift and Enter for a new line.
         </span>
+
         <button
           className="send-button"
           type="submit"
@@ -256,6 +283,7 @@ export default function Twin() {
           <ArrowUp aria-hidden="true" size={18} />
         </button>
       </form>
+
       <p className="chat-disclaimer">
         Responses are generated from the profile context currently available.
       </p>
