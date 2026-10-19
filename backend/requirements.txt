@@ -7,3 +7,4 @@ boto3
 pypdf
 mangum
 httpx
+redis>=5,<7

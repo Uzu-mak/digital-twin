@@ -239,7 +239,6 @@ class S3SessionStore(SessionStore):
 
             raise
 
-        # Capture the ETag from the initial write.
         session.version = response["ETag"]
 
         return session
@@ -290,8 +289,6 @@ class S3SessionStore(SessionStore):
                 "Expired session"
             )
 
-        # Calculate new timestamps without changing
-        # the existing session before S3 confirms.
         now = utc_now()
 
         new_expires_at = now + timedelta(
@@ -332,7 +329,6 @@ class S3SessionStore(SessionStore):
 
             raise
 
-        # Only update the session after a successful write.
         session.updated_at = now
         session.expires_at = new_expires_at
         session.version = response["ETag"]
@@ -345,15 +341,247 @@ class S3SessionStore(SessionStore):
 
 
 # --------------------------------------------------
+# Redis session storage (Vercel / Upstash)
+# --------------------------------------------------
+
+class RedisSessionStore(SessionStore):
+
+    # Atomically compare the current serialized value
+    # with the expected value before saving.
+    _SAVE_SCRIPT = """
+    local current = redis.call('GET', KEYS[1])
+
+    if not current then
+        return 0
+    end
+
+    if current ~= ARGV[1] then
+        return -1
+    end
+
+    redis.call(
+        'SET',
+        KEYS[1],
+        ARGV[2],
+        'EX',
+        ARGV[3]
+    )
+
+    return 1
+    """
+
+    # Remove an expired value only if it has not
+    # changed since it was read.
+    _DELETE_IF_UNCHANGED_SCRIPT = """
+    local current = redis.call('GET', KEYS[1])
+
+    if current and current == ARGV[1] then
+        return redis.call('DEL', KEYS[1])
+    end
+
+    return 0
+    """
+
+    def __init__(self, redis_url, redis_client=None):
+        if redis_client is None:
+            if not redis_url:
+                raise ValueError(
+                    "Redis URL is required"
+                )
+
+            import redis
+
+            redis_client = redis.Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=5,
+                socket_timeout=5,
+            )
+
+        self.client = redis_client
+
+        self.save_script = self.client.register_script(
+            self._SAVE_SCRIPT
+        )
+
+        self.delete_if_unchanged_script = (
+            self.client.register_script(
+                self._DELETE_IF_UNCHANGED_SCRIPT
+            )
+        )
+
+    def _key(self, session_id):
+        validate_session_id(session_id)
+
+        return f"digital-twin:sessions:{session_id}"
+
+    def _version(self, data):
+        return hashlib.sha256(
+            data.encode("utf-8")
+        ).hexdigest()
+
+    def create(self):
+        session = new_session()
+        data = serialize(session)
+
+        created = self.client.set(
+            self._key(session.session_id),
+            data,
+            ex=SESSION_TTL_SECONDS,
+            nx=True,
+        )
+
+        if not created:
+            raise SessionConflictError(
+                "Session creation conflict"
+            )
+
+        session.version = self._version(data)
+        return session
+
+    def load(self, session_id):
+        key = self._key(session_id)
+        data = self.client.get(key)
+
+        if data is None:
+            return None
+
+        session = deserialize(
+            data,
+            version=self._version(data),
+        )
+
+        if expired(session):
+            self.delete_if_unchanged_script(
+                keys=[key],
+                args=[data],
+            )
+            return None
+
+        return session
+
+    def save(self, session):
+        if session.version is None:
+            raise ValueError(
+                "Session version is required"
+            )
+
+        if expired(session):
+            raise ValueError(
+                "Expired session"
+            )
+
+        key = self._key(session.session_id)
+
+        # Read the current value to validate the
+        # optimistic concurrency version.
+        current_data = self.client.get(key)
+
+        if current_data is None:
+            raise ValueError(
+                "Unknown or expired session"
+            )
+
+        if self._version(current_data) != session.version:
+            raise SessionConflictError(
+                "Session version conflict"
+            )
+
+        # Reject an expired session even if Redis
+        # has not removed the key yet.
+        current_session = deserialize(current_data)
+
+        if expired(current_session):
+            raise ValueError(
+                "Unknown or expired session"
+            )
+
+        now = utc_now()
+        new_expires_at = now + timedelta(
+            seconds=SESSION_TTL_SECONDS
+        )
+
+        updated_session = ChatSession(
+            session_id=session.session_id,
+            messages=session.messages,
+            updated_at=now,
+            expires_at=new_expires_at,
+            version=session.version,
+        )
+
+        data = serialize(updated_session)
+
+        # Atomic comparison and update.
+        # If another request changes the value
+        # between GET and this script, saving fails.
+        result = self.save_script(
+            keys=[key],
+            args=[
+                current_data,
+                data,
+                SESSION_TTL_SECONDS,
+            ],
+        )
+
+        if result == 0:
+            raise ValueError(
+                "Unknown or expired session"
+            )
+
+        if result == -1:
+            raise SessionConflictError(
+                "Session version conflict"
+            )
+
+        if result != 1:
+            raise RuntimeError(
+                "Unexpected Redis save result"
+            )
+
+        # Update the in-memory session only after
+        # Redis confirms the write.
+        session.updated_at = now
+        session.expires_at = new_expires_at
+        session.version = self._version(data)
+
+    def delete(self, session_id):
+        self.client.delete(
+            self._key(session_id)
+        )
+
+
+# --------------------------------------------------
 # Storage factory
 # --------------------------------------------------
 
 def create_session_store():
+    backend = os.getenv(
+        "SESSION_STORE_BACKEND",
+        "",
+    ).strip().lower()
+
+    if backend == "redis":
+        return RedisSessionStore(
+            redis_url=os.getenv(
+                "REDIS_URL",
+                "",
+            )
+        )
+
+    if backend not in ("", "local", "s3"):
+        raise ValueError(
+            f"Unsupported session storage backend: {backend}"
+        )
+
     use_s3 = (
-        os.getenv(
-            "USE_S3",
-            "false",
-        ).lower() == "true"
+        backend == "s3"
+        or (
+            backend == ""
+            and os.getenv(
+                "USE_S3",
+                "false",
+            ).lower() == "true"
+        )
     )
 
     if use_s3:
