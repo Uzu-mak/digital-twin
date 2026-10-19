@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -25,6 +26,8 @@ CATALOG_PATH = BACKEND_DIR / "data" / "github_catalog.json"
 API_ROOT = "https://api.github.com"
 MAX_DOCUMENT_BYTES = 150_000
 MAX_DOCUMENTS_PER_REPOSITORY = 6
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_FEATURED_REPOSITORIES = (
     "AegisOps-AI-Multimodal-Enterprise-GraphRAG-Reliability-Platform",
@@ -660,10 +663,33 @@ def _sync_repository(
 
 
 # --------------------------------------------------
-# Redis GitHub catalog storage
+# Catalog storage (Redis in production, local file in development)
 # --------------------------------------------------
 
 REDIS_CATALOG_KEY = "digital-twin:github:catalog"
+REDIS_PREVIOUS_CATALOG_KEY = "digital-twin:github:catalog:previous"
+REDIS_SYNC_LOCK_KEY = "digital-twin:github:sync-lock"
+
+# A sync normally takes a minute or two; the lock expires on its own if a
+# runner dies mid-sync, so a crashed job cannot block syncs forever.
+SYNC_LOCK_TTL_SECONDS = 30 * 60
+
+# Compare-and-delete so a slow run never releases a lock that has since
+# expired and been taken by another run.
+_RELEASE_LOCK_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
+class GitHubStorageError(GitHubSyncError):
+    """Catalog storage (Redis or the local file) could not be reached."""
+
+
+class GitHubSyncInProgressError(GitHubSyncError):
+    """Another synchronization run currently holds the sync lock."""
 
 
 def _validate_catalog(catalog: Any) -> dict[str, Any]:
@@ -675,7 +701,26 @@ def _validate_catalog(catalog: Any) -> dict[str, Any]:
             "The GitHub catalog has an invalid format."
         )
 
+    for repository in catalog["repositories"]:
+        if (
+            not isinstance(repository, dict)
+            or not isinstance(repository.get("full_name"), str)
+            or not isinstance(repository.get("documents", []), list)
+        ):
+            raise GitHubSyncError(
+                "The GitHub catalog has an invalid repository entry."
+            )
+
     return catalog
+
+
+def uses_redis_catalog(catalog_path: Path | None = None) -> bool:
+    """Redis mode applies only when no explicit local path is given."""
+    return (
+        catalog_path is None
+        and os.getenv("KNOWLEDGE_STORE_BACKEND", "local").strip().lower()
+        == "redis"
+    )
 
 
 def _redis_catalog_client():
@@ -696,31 +741,151 @@ def _redis_catalog_client():
     )
 
 
-def _write_redis_catalog(catalog: dict[str, Any]) -> None:
-    validated = _validate_catalog(catalog)
-    client = _redis_catalog_client()
+def _redis_errors() -> tuple[type[BaseException], ...]:
+    try:
+        import redis
+    except ImportError:
+        return (ConnectionError, TimeoutError)
 
-    client.set(
-        REDIS_CATALOG_KEY,
-        json.dumps(validated, ensure_ascii=False),
-    )
+    return (redis.exceptions.RedisError, ConnectionError, TimeoutError)
 
 
-def _load_redis_catalog() -> dict[str, Any] | None:
-    client = _redis_catalog_client()
-    raw = client.get(REDIS_CATALOG_KEY)
-
-    if raw is None:
-        return None
-
+def _parse_catalog(raw: Any, label: str) -> dict[str, Any]:
     try:
         catalog = json.loads(raw)
     except (TypeError, json.JSONDecodeError) as error:
         raise GitHubSyncError(
-            "The Redis GitHub catalog is invalid."
+            f"The {label} GitHub catalog is invalid."
         ) from error
 
     return _validate_catalog(catalog)
+
+
+def _write_redis_catalog(catalog: dict[str, Any]) -> None:
+    """Publish a catalog and keep the one it replaces for rollback.
+
+    The new catalog and the previous-snapshot copy are written in one
+    MULTI/EXEC transaction, so readers see either the old catalog or the
+    new one, never a mix.
+    """
+    validated = _validate_catalog(catalog)
+    client = _redis_catalog_client()
+
+    try:
+        current = client.get(REDIS_CATALOG_KEY)
+
+        pipeline = client.pipeline(transaction=True)
+
+        if current is not None:
+            pipeline.set(REDIS_PREVIOUS_CATALOG_KEY, current)
+
+        pipeline.set(
+            REDIS_CATALOG_KEY,
+            json.dumps(validated, ensure_ascii=False),
+        )
+        pipeline.execute()
+
+    except _redis_errors() as error:
+        raise GitHubStorageError(
+            "Redis catalog storage is unavailable; "
+            "the previous catalog was left in place."
+        ) from error
+
+
+def _load_redis_catalog(
+    key: str = REDIS_CATALOG_KEY,
+) -> dict[str, Any] | None:
+    client = _redis_catalog_client()
+
+    try:
+        raw = client.get(key)
+    except _redis_errors() as error:
+        raise GitHubStorageError(
+            "Redis catalog storage is unavailable."
+        ) from error
+
+    if raw is None:
+        return None
+
+    return _parse_catalog(raw, "Redis")
+
+
+def _rollback_redis_catalog() -> dict[str, Any]:
+    client = _redis_catalog_client()
+
+    try:
+        current = client.get(REDIS_CATALOG_KEY)
+        previous = client.get(REDIS_PREVIOUS_CATALOG_KEY)
+
+        if previous is None:
+            raise GitHubSyncError(
+                "No previous catalog snapshot is available."
+            )
+
+        restored = _parse_catalog(previous, "previous Redis")
+
+        pipeline = client.pipeline(transaction=True)
+        pipeline.set(REDIS_CATALOG_KEY, previous)
+
+        if current is not None:
+            pipeline.set(REDIS_PREVIOUS_CATALOG_KEY, current)
+
+        pipeline.execute()
+
+    except _redis_errors() as error:
+        raise GitHubStorageError(
+            "Redis catalog storage is unavailable."
+        ) from error
+
+    return restored
+
+
+class _RedisSyncLock:
+    """Prevents two sync runs from publishing or cleaning up at once."""
+
+    def __init__(self, client) -> None:
+        self.client = client
+        self.token = os.urandom(16).hex()
+
+    def __enter__(self):
+        try:
+            acquired = self.client.set(
+                REDIS_SYNC_LOCK_KEY,
+                self.token,
+                nx=True,
+                ex=SYNC_LOCK_TTL_SECONDS,
+            )
+        except _redis_errors() as error:
+            raise GitHubStorageError(
+                "Redis is unavailable; synchronization did not start."
+            ) from error
+
+        if not acquired:
+            raise GitHubSyncInProgressError(
+                "Another GitHub synchronization is already running."
+            )
+
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        try:
+            release = self.client.register_script(_RELEASE_LOCK_SCRIPT)
+            release(keys=[REDIS_SYNC_LOCK_KEY], args=[self.token])
+        except _redis_errors():
+            # The lock expires on its own; never mask the sync result.
+            logger.warning("Could not release the GitHub sync lock.")
+
+
+class _NoLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        return None
+
+
+def _previous_catalog_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}.previous{path.suffix}")
 
 
 def _write_catalog(
@@ -773,6 +938,104 @@ def _write_catalog(
             temporary_path.unlink()
 
 
+def _read_current_catalog(
+    use_redis: bool,
+    catalog_path: Path,
+) -> dict[str, Any] | None:
+    """Read the published catalog for carry-over and cleanup decisions.
+
+    A corrupt catalog is treated as absent so a sync can repair it, but a
+    storage outage still fails the sync before anything is written.
+    """
+    try:
+        if use_redis:
+            return _load_redis_catalog()
+
+        if not catalog_path.is_file():
+            return None
+
+        return _parse_catalog(
+            catalog_path.read_text(encoding="utf-8"),
+            "local",
+        )
+
+    except GitHubStorageError:
+        raise
+
+    except (GitHubSyncError, OSError):
+        logger.warning(
+            "The published GitHub catalog is unreadable; "
+            "it will be replaced by this sync."
+        )
+        return None
+
+
+def _storage_ids(catalog: dict[str, Any] | None) -> set[str]:
+    """Every knowledge-store ID a catalog references."""
+    if not catalog:
+        return set()
+
+    referenced: set[str] = set()
+
+    for repository in catalog.get("repositories", []):
+        if not isinstance(repository, dict):
+            continue
+
+        for document in repository.get("documents", []) or []:
+            if not isinstance(document, dict):
+                continue
+
+            # Legacy catalogs stored documents under the plain document ID.
+            value = document.get("storage_id", document.get("document_id"))
+
+            if isinstance(value, str):
+                referenced.add(value)
+
+    return referenced
+
+
+def _documentation_failed(
+    full_name: str,
+    warnings: list[str],
+) -> bool:
+    prefixes = (
+        f"{full_name}: commit lookup failed",
+        f"{full_name}: documentation lookup failed",
+    )
+
+    return any(warning.startswith(prefixes) for warning in warnings)
+
+
+def _cleanup_stale_documents(
+    store: KnowledgeStore,
+    keep: set[str],
+) -> int:
+    """Delete GitHub documents that no published snapshot references.
+
+    Runs only after a successful publish. Documents referenced by either
+    the new catalog or the snapshot it replaced are kept, so readers that
+    loaded the old catalog a moment ago and a later rollback still work.
+    """
+    try:
+        stored_ids = store.list_ids()
+    except NotImplementedError:
+        return 0
+
+    removed = 0
+
+    for document_id in stored_ids:
+        if not document_id.startswith("github:") or document_id in keep:
+            continue
+
+        try:
+            store.delete(document_id)
+            removed += 1
+        except NotImplementedError:
+            return removed
+
+    return removed
+
+
 def sync_catalog(
     username: str | None = None,
     token: str | None = None,
@@ -780,7 +1043,20 @@ def sync_catalog(
     client: GitHubClient | None = None,
     catalog_path: Path | None = None,
     knowledge_store: KnowledgeStore | None = None,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
+    """Synchronize public repositories and publish a new catalog snapshot.
+
+    Order of operations:
+    1. Take the sync lock (Redis mode) so runs cannot overlap.
+    2. Store each README/doc under a revision-scoped ID
+       (``<document_id>@<commit sha>``). Documents of the published
+       catalog are never overwritten, so readers keep a consistent view.
+    3. Publish the new catalog in one write, keeping the old one as the
+       rollback snapshot. Any failure before this step leaves the
+       published catalog untouched.
+    4. Delete documents that neither snapshot references.
+    """
     username = (
         username
         or os.getenv(
@@ -807,7 +1083,7 @@ def sync_catalog(
         else GitHubClient(token=token)
     )
 
-    explicit_catalog_path = catalog_path is not None
+    use_redis = uses_redis_catalog(catalog_path)
 
     catalog_path = (
         catalog_path
@@ -815,83 +1091,147 @@ def sync_catalog(
         else CATALOG_PATH
     )
 
-    synced_at = utc_now()
-
-    public_repositories = fetch_public_repositories(
-        client,
-        username,
+    lock = (
+        _RedisSyncLock(_redis_catalog_client())
+        if use_redis
+        else _NoLock()
     )
 
-    store = (
-        knowledge_store
-        if knowledge_store is not None
-        else create_knowledge_store()
-    )
+    with lock:
+        current_catalog = _read_current_catalog(use_redis, catalog_path)
 
-    repositories: list[dict[str, Any]] = []
-    warnings: list[str] = []
+        current_by_name = {
+            repository["full_name"].lower(): repository
+            for repository in (current_catalog or {}).get(
+                "repositories", []
+            )
+            if isinstance(repository, dict)
+            and isinstance(repository.get("full_name"), str)
+        }
 
-    for repository in public_repositories:
-        normalized, repo_warnings = _sync_repository(
+        synced_at = utc_now()
+
+        public_repositories = fetch_public_repositories(
             client,
-            repository,
-            featured,
-            synced_at,
+            username,
         )
 
-        full_name = normalized["full_name"]
+        store = (
+            knowledge_store
+            if knowledge_store is not None
+            else create_knowledge_store()
+        )
 
-        for document in normalized["documents"]:
-            document_id = (
-                f"github:{full_name}:{document['path']}"
+        repositories: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        for repository in public_repositories:
+            normalized, repo_warnings = _sync_repository(
+                client,
+                repository,
+                featured,
+                synced_at,
             )
 
-            knowledge_document = KnowledgeDocument(
-                document_id=document_id,
-                source_url=document["source_url"],
-                content=document["content"],
-                repository=full_name,
-                revision=document.get("revision"),
-                updated_at=datetime.now(timezone.utc),
+            full_name = normalized["full_name"]
+
+            for document in normalized["documents"]:
+                document_id = (
+                    f"github:{full_name}:{document['path']}"
+                )
+                storage_id = f"{document_id}@{document['revision']}"
+
+                knowledge_document = KnowledgeDocument(
+                    document_id=storage_id,
+                    source_url=document["source_url"],
+                    content=document["content"],
+                    repository=full_name,
+                    revision=document.get("revision"),
+                    updated_at=datetime.now(timezone.utc),
+                )
+
+                # Store content before publishing its reference.
+                store.put(knowledge_document)
+
+                document["document_id"] = document_id
+                document["storage_id"] = storage_id
+
+                # Keep metadata in the catalog, not full text.
+                del document["content"]
+
+            previous = current_by_name.get(full_name.lower())
+
+            # A transient GitHub failure for one repository should not
+            # erase its last known good documentation.
+            if (
+                not normalized["documents"]
+                and previous
+                and previous.get("documents")
+                and _documentation_failed(full_name, repo_warnings)
+            ):
+                normalized["documents"] = previous["documents"]
+                normalized["documented_deployment_links"] = previous.get(
+                    "documented_deployment_links",
+                    [],
+                )
+                repo_warnings.append(
+                    f"{full_name}: kept documentation from the previous "
+                    "successful sync."
+                )
+
+            repositories.append(normalized)
+            warnings.extend(repo_warnings)
+
+        if (
+            not repositories
+            and current_catalog
+            and current_catalog.get("repositories")
+            and not allow_empty
+        ):
+            raise GitHubSyncError(
+                "GitHub returned no public repositories but the published "
+                "catalog has some; refusing to publish an empty catalog. "
+                "Re-run with allow_empty=True (--allow-empty) if this is "
+                "intended."
             )
 
-            # Store content before publishing its reference.
-            store.put(knowledge_document)
+        catalog = _validate_catalog({
+            "schema_version": 1,
+            "username": username,
+            "last_synchronized_at": synced_at,
+            "repository_count": len(repositories),
+            "repositories": repositories,
+            "warnings": warnings,
+        })
 
-            document["document_id"] = document_id
+        # Publish only after all document writes have succeeded.
+        if use_redis:
+            _write_redis_catalog(catalog)
+        else:
+            previous_path = _previous_catalog_path(catalog_path)
 
-            # Keep metadata in the catalog, not full text.
-            del document["content"]
+            if current_catalog is not None:
+                _write_catalog(previous_path, current_catalog)
 
-        repositories.append(normalized)
-        warnings.extend(repo_warnings)
+            _write_catalog(catalog_path, catalog)
 
-    catalog = {
-        "schema_version": 1,
-        "username": username,
-        "last_synchronized_at": synced_at,
-        "repository_count": len(repositories),
-        "repositories": repositories,
-        "warnings": warnings,
-    }
+        try:
+            removed = _cleanup_stale_documents(
+                store,
+                _storage_ids(catalog) | _storage_ids(current_catalog),
+            )
+            logger.info("Removed %d stale knowledge document(s).", removed)
 
-    # Publish only after all document writes have succeeded.
-    if (
-        not explicit_catalog_path
-        and os.getenv("KNOWLEDGE_STORE_BACKEND", "local").strip().lower()
-        == "redis"
-    ):
-        _write_redis_catalog(catalog)
-    else:
-        _write_catalog(catalog_path, catalog)
+        except Exception:
+            # Publication already succeeded; stale documents are not
+            # referenced by the catalog, so retrieval cannot use them.
+            logger.exception("Stale knowledge-document cleanup failed.")
 
     return catalog
 
 
-def load_catalog(
-    catalog_path: Path | None = None,
-) -> dict[str, Any]:
-    empty_catalog = {
+def _empty_catalog() -> dict[str, Any]:
+    return {
         "schema_version": 1,
         "username": os.getenv("GITHUB_USERNAME", "Uzu-mak"),
         "last_synchronized_at": None,
@@ -900,19 +1240,24 @@ def load_catalog(
         "warnings": [],
     }
 
-    backend = os.getenv(
-        "KNOWLEDGE_STORE_BACKEND", "local"
-    ).strip().lower()
 
+def load_catalog(
+    catalog_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load the published catalog.
+
+    Redis mode raises GitHubStorageError when Redis is unreachable rather
+    than pretending the catalog is empty.
+    """
     # Production Redis mode; explicit paths remain local for tests.
-    if catalog_path is None and backend == "redis":
+    if uses_redis_catalog(catalog_path):
         catalog = _load_redis_catalog()
-        return catalog if catalog is not None else empty_catalog
+        return catalog if catalog is not None else _empty_catalog()
 
     path = catalog_path if catalog_path is not None else CATALOG_PATH
 
     if not path.is_file():
-        return empty_catalog
+        return _empty_catalog()
 
     try:
         catalog = json.loads(path.read_text(encoding="utf-8"))
@@ -922,6 +1267,58 @@ def load_catalog(
         ) from error
 
     return _validate_catalog(catalog)
+
+
+def load_previous_catalog(
+    catalog_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Load the rollback snapshot, if one exists."""
+    if uses_redis_catalog(catalog_path):
+        return _load_redis_catalog(REDIS_PREVIOUS_CATALOG_KEY)
+
+    path = _previous_catalog_path(
+        catalog_path if catalog_path is not None else CATALOG_PATH
+    )
+
+    if not path.is_file():
+        return None
+
+    return _parse_catalog(path.read_text(encoding="utf-8"), "local")
+
+
+def rollback_catalog(
+    catalog_path: Path | None = None,
+) -> dict[str, Any]:
+    """Swap the published catalog with its previous snapshot."""
+    if uses_redis_catalog(catalog_path):
+        return _rollback_redis_catalog()
+
+    path = catalog_path if catalog_path is not None else CATALOG_PATH
+    previous_path = _previous_catalog_path(path)
+
+    if not previous_path.is_file():
+        raise GitHubSyncError(
+            "No previous catalog snapshot is available."
+        )
+
+    restored = _parse_catalog(
+        previous_path.read_text(encoding="utf-8"),
+        "local",
+    )
+
+    current = (
+        json.loads(path.read_text(encoding="utf-8"))
+        if path.is_file()
+        else None
+    )
+
+    _write_catalog(path, restored)
+
+    if current is not None:
+        _write_catalog(previous_path, current)
+
+    return restored
+
 
 def public_directory(
     catalog: dict[str, Any] | None = None,

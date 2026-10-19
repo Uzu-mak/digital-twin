@@ -110,7 +110,13 @@ def test_sync_persists_document_and_catalog_reference(environment):
 
     assert "content" not in document
 
-    stored = environment["store"].get(document["document_id"])
+    # Content is stored under a revision-scoped ID so a new sync never
+    # overwrites documents the published catalog still points to.
+    assert document["storage_id"] == (
+        "github:Uzu-mak/AegisOps:README.md@commit-abc123"
+    )
+
+    stored = environment["store"].get(document["storage_id"])
 
     assert stored is not None
     assert "Qdrant" in stored.content

@@ -1,0 +1,80 @@
+name: Sync GitHub catalog
+
+# Refreshes the portfolio's GitHub catalog and README knowledge in Upstash
+# Redis. The deployed API reads Redis directly, so no Vercel redeploy is
+# needed after a sync.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours (UTC); runs from the default branch
+  workflow_dispatch:
+    inputs:
+      allow_empty:
+        description: "Publish even if GitHub returns no public repositories"
+        type: boolean
+        default: false
+
+# Read-only: the job only reads public repository data.
+permissions:
+  contents: read
+
+# Never run two syncs at once; a queued run waits instead of cancelling
+# one that is mid-publish. The Redis sync lock is a second safeguard.
+concurrency:
+  group: sync-github-catalog
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      KNOWLEDGE_STORE_BACKEND: redis
+      REDIS_URL: ${{ secrets.REDIS_URL }}
+      # The workflow token raises GitHub's API rate limit to 1,000
+      # requests/hour; it is only used to read public repositories.
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_USERNAME: ${{ vars.PORTFOLIO_GITHUB_USERNAME || 'Uzu-mak' }}
+      GITHUB_FEATURED_REPOSITORIES: ${{ vars.PORTFOLIO_FEATURED_REPOSITORIES }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        run: |
+          if [ -z "$REDIS_URL" ]; then
+            echo "::error::Repository secret REDIS_URL is not set (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install backend dependencies
+        run: uv sync --frozen
+
+      - name: Show published catalog before sync
+        # Informational only; a missing or unreadable catalog must not
+        # stop the sync that would repair it.
+        continue-on-error: true
+        run: uv run --frozen python sync_github.py --status
+
+      - name: Synchronize GitHub catalog
+        env:
+          ALLOW_EMPTY: ${{ inputs.allow_empty }}
+        run: |
+          args=()
+          if [ "$ALLOW_EMPTY" = "true" ]; then
+            args+=(--allow-empty)
+          fi
+          uv run --frozen python sync_github.py "${args[@]}"
+
+      - name: Show published catalog after sync
+        if: always()
+        run: uv run --frozen python sync_github.py --status

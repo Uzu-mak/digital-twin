@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -19,7 +19,7 @@ load_dotenv(BASE_DIR / ".env", override=True)
 # Support running from the backend directory or as a package.
 if __package__:
     from .context import prompt as profile_prompt
-    from .github_catalog import public_directory
+    from .github_catalog import GitHubSyncError, public_directory
     from .retrieval import build_grounded_messages
     from .session_store import create_session_store
     from .storage import (
@@ -29,7 +29,7 @@ if __package__:
     )
 else:
     from context import prompt as profile_prompt
-    from github_catalog import public_directory
+    from github_catalog import GitHubSyncError, public_directory
     from retrieval import build_grounded_messages
     from session_store import create_session_store
     from storage import (
@@ -125,9 +125,29 @@ async def health_check():
     return {"status": "healthy"}
 
 
+# Browsers may reuse the directory for a minute; Vercel's CDN for five,
+# serving a stale copy while it refreshes. Syncs run every few hours, so
+# new repositories appear within minutes of a sync with no redeploy.
+PROJECTS_CACHE_CONTROL = (
+    "public, max-age=60, s-maxage=300, stale-while-revalidate=600"
+)
+
+
 @app.get("/projects")
-async def projects():
-    return public_directory()
+def projects(response: Response):
+    try:
+        directory = public_directory()
+    except GitHubSyncError:
+        logger.exception("Project catalog unavailable")
+
+        raise HTTPException(
+            status_code=503,
+            detail="The project catalog is temporarily unavailable.",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    response.headers["Cache-Control"] = PROJECTS_CACHE_CONTROL
+    return directory
 
 
 @app.post("/chat", response_model=ChatResponse)

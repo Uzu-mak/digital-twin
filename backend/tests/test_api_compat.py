@@ -197,6 +197,25 @@ class ApiCompatibilityTests(unittest.TestCase):
             response.json()["repositories"][0],
         )
 
+        # Short CDN cache so a new sync shows up without a redeploy.
+        self.assertIn(
+            "s-maxage=300",
+            response.headers["cache-control"],
+        )
+
+    def test_projects_returns_503_when_catalog_storage_is_down(self):
+        from github_catalog import GitHubStorageError
+
+        with patch(
+            "server.public_directory",
+            side_effect=GitHubStorageError("Redis unavailable"),
+        ):
+            response = self.client.get("/projects")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn("Redis", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()
