@@ -88,7 +88,7 @@ Atomic snapshot publishing, rollback, a sync lock, prompt-injection-aware retrie
 
 ## Table of contents
 
-- [Architecture](#architecture)
+- [Architecture](#architecture) (C4 context · containers · components)
 - [How a chat answer is built](#how-a-chat-answer-is-built)
 - [Self-updating knowledge from GitHub](#self-updating-knowledge-from-github)
 - [Sessions](#sessions)
@@ -107,49 +107,125 @@ Atomic snapshot publishing, rollback, a sync lock, prompt-injection-aware retrie
 
 ## Architecture
 
-Two independent flows share one Redis instance: **serving** (visitors → API) and **ingestion** (GitHub → Redis). Deploying code and refreshing knowledge are separate operations, so a README change never needs a redeploy.
+The architecture is documented with the [C4 model](https://c4model.com), zooming in one level at a time: **context** (who and what the system talks to), **containers** (what gets deployed where), and **components** (what's inside the API).
+
+**Legend:** 🟦 dark blue = person · 🟦 blue = part of Digital Twin · 🟦 light blue = component inside the API · ⬜ grey = external system. Arrows read *"uses"* and are labelled with the purpose and protocol.
+
+### Level 1 · System context
 
 ```mermaid
-flowchart LR
-    subgraph Visitors
-        V(["🧑‍💻 Visitor"])
-    end
+flowchart TB
+    visitor["<b>Visitor</b><br/><i>[Person]</i><br/>Recruiter, engineer or<br/>hiring manager"]
+    owner["<b>Jeremiah</b><br/><i>[Person]</i><br/>Portfolio owner"]
 
-    subgraph Vercel["Vercel"]
-        FE["Next.js portfolio<br/>Project directory · Embedded chat"]
-        API["FastAPI<br/>/projects · /chat · /health"]
-    end
+    dt["<b>Digital Twin</b><br/><i>[Software System]</i><br/>Portfolio with an AI assistant that<br/>answers from my profile and repos"]
 
-    subgraph Redis["Upstash Redis"]
-        CAT[("Catalog<br/>+ previous snapshot")]
-        DOCS[("README / docs<br/>by commit")]
-        SES[("Chat sessions<br/>60-min TTL")]
-    end
+    github["<b>GitHub</b><br/><i>[External System]</i><br/>Public repositories,<br/>READMEs and docs"]
+    openai["<b>OpenAI API</b><br/><i>[External System]</i><br/>LLM chat completions"]
 
-    subgraph Ingestion["Ingestion · GitHub Actions, every 6 h"]
-        GH["GitHub REST API<br/>public repos of Uzu-mak"]
-        SYNC["sync_github.py"]
-    end
+    visitor -- "Browses projects,<br/>asks questions<br/>[HTTPS]" --> dt
+    owner -- "Pushes code and docs<br/>[git]" --> github
+    dt -- "Reads repo metadata and docs<br/>[REST / HTTPS]" --> github
+    dt -- "Sends grounded prompts<br/>[HTTPS / JSON]" --> openai
 
-    LLM["OpenAI<br/>gpt-4o-mini"]
-
-    V --> FE --> API
-    API -->|read| CAT
-    API -->|read| DOCS
-    API <-->|read / write| SES
-    API -->|grounded prompt| LLM
-    GH --> SYNC
-    SYNC -->|1. store docs| DOCS
-    SYNC -->|2. publish snapshot| CAT
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef component fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef store fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#ffffff
+    class visitor,owner person
+    class dt container
+    class github,openai external
 ```
 
-| Component | Responsibility |
-|---|---|
-| **Next.js frontend** | Portfolio UI, searchable project directory, embedded chat; talks to the API through `NEXT_PUBLIC_API_URL` |
-| **FastAPI backend** | Validates requests, manages sessions, retrieves evidence, calls the LLM, serves the project directory |
-| **Upstash Redis** | Shared state for serverless functions: sessions, the GitHub catalog and ingested documents |
-| **GitHub Actions** | Runs the sync on a schedule, independent of deployments |
-| **Storage abstractions** | `SessionStore` and `KnowledgeStore` interfaces with local-file, S3 and Redis implementations, chosen by environment variable |
+### Level 2 · Containers
+
+Two independent paths share one data store: **serving** (visitor → web app → API) and **ingestion** (sync job → data store). Deploying code and refreshing knowledge are separate operations, so a README change never needs a redeploy.
+
+```mermaid
+flowchart TB
+    visitor["<b>Visitor</b><br/><i>[Person]</i>"]
+
+    subgraph dt["Digital Twin · Software System"]
+        web["<b>Web App</b><br/><i>[Next.js 16 · React 19]</i><br/>Portfolio, project directory,<br/>chat UI · hosted on Vercel"]
+        api["<b>API</b><br/><i>[FastAPI · Python 3.12]</i><br/>/chat · /projects · /health<br/>serverless on Vercel"]
+        sync["<b>Sync Job</b><br/><i>[Python CLI]</i><br/>Ingests repos, publishes snapshots<br/>GitHub Actions, every 6 h"]
+        redis[("<b>Data Store</b><br/><i>[Upstash Redis]</i><br/>Sessions · catalog ·<br/>documents by commit")]
+    end
+
+    github["<b>GitHub API</b><br/><i>[External System]</i>"]
+    openai["<b>OpenAI API</b><br/><i>[External System]</i>"]
+
+    visitor -- "Uses<br/>[HTTPS]" --> web
+    web -- "GET /projects<br/>POST /chat<br/>[HTTPS / JSON]" --> api
+    api -- "Reads catalog and docs,<br/>reads/writes sessions<br/>[Redis / TLS]" --> redis
+    api -- "Chat completion<br/>[HTTPS / JSON]" --> openai
+    sync -- "Lists repos, fetches docs<br/>[REST / HTTPS]" --> github
+    sync -- "Stores docs,<br/>publishes catalog<br/>[Redis / TLS]" --> redis
+
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef component fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef store fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#ffffff
+    class visitor person
+    class web,api,sync container
+    class redis store
+    class github,openai external
+    style dt fill:none,stroke:#1168bd,stroke-width:2px,stroke-dasharray:6 4,color:#1168bd
+```
+
+| Container | Technology | Runs on | Responsibility |
+|---|---|---|---|
+| **Web App** | Next.js 16, React 19, TypeScript | Vercel | Portfolio UI, searchable project directory, embedded chat; calls the API via `NEXT_PUBLIC_API_URL` |
+| **API** | FastAPI, Python 3.12 | Vercel (serverless) | Validates requests, manages sessions, retrieves evidence, calls the LLM, serves the directory |
+| **Sync Job** | Python CLI (`sync_github.py`) | GitHub Actions, cron `0 */6 * * *` | Discovers public repos, stores docs by commit, publishes catalog snapshots |
+| **Data Store** | Upstash Redis | Upstash | Shared state for stateless functions: sessions, catalog, documents |
+
+### Level 3 · Components of the API
+
+```mermaid
+flowchart TB
+    web["<b>Web App</b><br/><i>[Container]</i>"]
+
+    subgraph api["API · FastAPI container"]
+        routes["<b>HTTP Routes</b><br/><i>server.py</i><br/>validation, errors, CORS"]
+        retr["<b>Retriever</b><br/><i>retrieval.py</i><br/>rank · verify provenance ·<br/>bound evidence"]
+        persona["<b>Persona &amp; Profile</b><br/><i>context.py · data/</i>"]
+        cat["<b>Catalog Reader</b><br/><i>github_catalog.py</i>"]
+        ks["<b>Knowledge Store</b><br/><i>knowledge_store.py</i>"]
+        ss["<b>Session Store</b><br/><i>session_store.py</i>"]
+    end
+
+    redis[("<b>Data Store</b><br/><i>[Upstash Redis]</i>")]
+    openai["<b>OpenAI API</b><br/><i>[External System]</i>"]
+
+    web -- "[HTTPS / JSON]" --> routes
+    routes -- "/projects" --> cat
+    routes -- "/chat: build prompt" --> retr
+    routes -- "load / save" --> ss
+    routes -- "system prompt" --> persona
+    routes -- "completion" --> openai
+    retr -- "profile facts" --> persona
+    retr -- "catalog" --> cat
+    retr -- "documents" --> ks
+    cat --> redis
+    ks --> redis
+    ss --> redis
+
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef component fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef store fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef external fill:#8a8a8a,stroke:#6b6b6b,color:#ffffff
+    class web container
+    class routes,retr,persona,cat,ks,ss component
+    class redis store
+    class openai external
+    style api fill:none,stroke:#1168bd,stroke-width:2px,stroke-dasharray:6 4,color:#1168bd
+```
+
+The three stores sit behind interfaces in `storage.py` (`SessionStore`, `KnowledgeStore`), each with **local-file, S3 and Redis** implementations chosen by environment variable, so the same code runs in tests, locally and on Vercel.
 
 ---
 
@@ -158,24 +234,34 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     autonumber
-    participant U as Visitor
-    participant FE as Next.js chat
-    participant API as FastAPI /chat
-    participant R as Redis
+    actor V as Visitor
+    participant W as Web App
+    participant A as API routes
+    participant S as Session Store
+    participant R as Retriever
+    participant D as Redis
     participant L as OpenAI
 
-    U->>FE: Ask a question
-    FE->>API: POST /chat {message, session_id?}
-    API->>R: Load or create session (UUIDv4)
-    API->>R: Load published catalog
-    API->>API: Rank sources by query terms<br/>(featured repos boosted)
-    API->>R: Fetch top README/docs by storage ID
-    API->>API: Verify provenance (repo, path, commit, URL)<br/>Trim to 7 sources / 12k chars
-    API->>L: System prompt + evidence as untrusted JSON<br/>+ last 40 messages + question
-    L-->>API: Answer with inline citations
-    API->>R: Save session (optimistic version check)
-    API-->>FE: {response, session_id}
-    FE-->>U: Render answer
+    V->>W: Ask a question
+    W->>+A: POST /chat {message, session_id?}
+    alt no session_id
+        A->>S: create() → new UUIDv4
+    else session_id sent
+        A->>S: load(session_id)
+        S-->>A: session, or 404 if expired
+    end
+    A->>+R: build_grounded_messages(question)
+    R->>D: GET catalog
+    R->>R: Rank sources by query terms (≤ 7)
+    R->>D: GET documents by storage_id
+    R->>R: Verify provenance (repo, path, commit, URL)
+    R->>R: Excerpt evidence to ≤ 12,000 chars
+    R-->>-A: System prompt + evidence as untrusted JSON
+    A->>L: Chat completion (+ last 40 messages)
+    L-->>A: Answer with inline citations
+    A->>S: save(session) · compare-and-set
+    A-->>-W: {response, session_id}
+    W-->>V: Render answer
 ```
 
 <details>
@@ -215,24 +301,31 @@ Lexical ranking is deliberate: the corpus is small (a few READMEs per repository
 ```mermaid
 sequenceDiagram
     autonumber
-    participant GA as GitHub Actions<br/>(every 6 h)
-    participant S as sync_github.py
-    participant GH as GitHub API
-    participant R as Redis
+    participant C as GitHub Actions<br/>(cron, every 6 h)
+    participant J as Sync Job
+    participant G as GitHub API
+    participant D as Redis
 
-    GA->>S: Run sync
-    S->>R: Acquire sync lock (SET NX, 30-min expiry)
-    S->>R: Read current catalog
-    S->>GH: List public repos (all pages)
-    loop Each repository
-        S->>GH: Latest commit · languages · file tree
-        S->>GH: Download README + docs/*.md (≤ 6)
-        S->>R: Store each doc as <doc_id>@<commit_sha>
+    C->>J: python sync_github.py
+    J->>D: SET sync-lock NX EX 1800
+    alt lock already held
+        D-->>J: not acquired
+        J-->>C: exit 1 · catalog unchanged
+    else lock acquired
+        J->>D: GET catalog (for carry-over and cleanup)
+        J->>G: GET /users/Uzu-mak/repos (all pages)
+        loop each public repository
+            J->>G: Commit SHA · languages · file tree
+            J->>G: README + docs/*.md (≤ 6 files, ≤ 150 KB each)
+            J->>D: SET document@commit_sha
+        end
+        J->>J: Validate catalog · refuse empty-over-full
+        J->>D: MSET catalog + catalog:previous (atomic)
+        J->>D: DEL documents neither snapshot references
+        J->>D: Release lock (compare-and-delete)
+        J-->>C: exit 0 · summary and warnings
     end
-    S->>S: Validate catalog<br/>(refuse empty-over-full)
-    S->>R: Atomic MSET: new catalog + previous snapshot
-    S->>R: Delete docs neither snapshot references
-    S->>R: Release lock (compare-and-delete)
+    Note over J,D: Any failure before MSET exits non-zero<br/>and leaves the published catalog untouched
 ```
 
 ### Why the publish is safe
@@ -240,25 +333,39 @@ sequenceDiagram
 Documents are stored under **revision-scoped IDs** (`github:Uzu-mak/AegisOps:README.md@4f2c…`). A sync writes the new revision *next to* the old one, never over it, and switches the catalog pointer in a single atomic write. Readers always see one consistent generation.
 
 ```mermaid
-flowchart TB
-    subgraph S1["① Sync stores the new revision beside the old"]
-        direction LR
-        C1["catalog"] --> R1["README@sha-1"]
-        N1["README@sha-2<br/>(written, not yet referenced)"]
+flowchart LR
+    subgraph S1["① Store new revision beside old"]
+        direction TB
+        c1["catalog"] --> r11["README@sha-1"]
+        n12["README@sha-2"]
     end
-    subgraph S2["② One atomic MSET switches both pointers"]
-        direction LR
-        C2["catalog"] --> R2b["README@sha-2"]
-        P2["catalog:previous"] --> R2a["README@sha-1"]
+    subgraph S2["② Atomic MSET swaps pointers"]
+        direction TB
+        c2["catalog"] --> r22["README@sha-2"]
+        p2["catalog:previous"] --> r21["README@sha-1"]
     end
-    subgraph S3["③ Next sync: unreferenced revisions are deleted"]
-        direction LR
-        C3["catalog"] --> R3["README@sha-3"]
-        P3["catalog:previous"] --> R3b["README@sha-2"]
-        X3["README@sha-1 🗑"]
+    subgraph S3["③ Next sync deletes unreferenced"]
+        direction TB
+        c3["catalog"] --> r33["README@sha-3"]
+        p3["catalog:previous"] --> r32["README@sha-2"]
+        x31["README@sha-1"]
     end
     S1 --> S2 --> S3
+
+    classDef key fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef doc fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef pending fill:#ffffff,stroke:#5d82a8,stroke-dasharray:4 3,color:#000000
+    classDef gone fill:#eeeeee,stroke:#aaaaaa,stroke-dasharray:4 3,color:#888888
+    class c1,c2,c3,p2,p3 key
+    class r11,r22,r21,r33,r32 doc
+    class n12 pending
+    class x31 gone
+    style S1 fill:none,stroke:#999999
+    style S2 fill:none,stroke:#999999
+    style S3 fill:none,stroke:#999999
 ```
+
+<sub>Dark blue: Redis catalog keys · light blue: referenced documents · dashed white: written but not yet referenced · grey: deleted.</sub>
 
 | What goes wrong | What happens |
 |---|---|
@@ -279,11 +386,12 @@ Full runbook (secrets, verification, troubleshooting, credential rotation): **[d
 ```mermaid
 stateDiagram-v2
     direction LR
-    [*] --> Active: first message
+    [*] --> Active: first message / create UUIDv4
     Active --> Conflict: concurrent write
     Conflict --> Active: retry after 409
     Active --> Expired: 60 min idle
-    Expired --> Active: 404, new session
+    Expired --> Active: 404 / start new session
+    Expired --> [*]: key evicted by TTL
 ```
 
 - **Isolation:** only canonical UUIDv4 IDs are accepted; there's no endpoint that lists sessions (an early public `/sessions` route was removed).
@@ -370,19 +478,18 @@ The request/response contract (`message`, optional `session_id` → `response`, 
 
 ## Testing
 
-```mermaid
-pie showData
-    title 104 tests by area
-    "Sync lifecycle (Redis mode)" : 27
-    "Redis catalog & stores" : 27
-    "Knowledge store (local/S3)" : 11
-    "Sessions (local/S3)" : 19
-    "GitHub catalog" : 5
-    "Knowledge integration" : 5
-    "API compatibility" : 5
-    "Retrieval" : 4
-    "Live Redis (opt-in)" : 1
-```
+| Area | Test file(s) | Tests |
+|---|---|---:|
+| Sync lifecycle (Redis mode, mocked GitHub) | `test_sync_lifecycle.py` | 27 |
+| Redis catalog and knowledge stores | `test_redis_backends.py`, `test_redis_catalog.py`, `test_redis_knowledge_store.py` | 27 |
+| Sessions (local and S3) | `test_session_store.py`, `test_s3_session_store.py` | 19 |
+| Knowledge store (local and S3) | `test_knowledge_store.py` | 11 |
+| GitHub catalog | `test_github_catalog.py` | 5 |
+| Knowledge integration (sync → store → retrieval) | `test_knowledge_integration.py` | 5 |
+| API contract | `test_api_compat.py` | 5 |
+| Retrieval and grounding | `test_retrieval.py` | 4 |
+| Live Redis (opt-in) | `test_redis_live.py` | 1 |
+| **Total** | **12 files** | **104** |
 
 <details>
 <summary><b>What the sync lifecycle tests prove</b></summary>
