@@ -189,6 +189,8 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 2px sol
 .markdown-body pre code { color: #d8e1da; font-family: var(--font-mono); font-size: 11px; line-height: 1.7; white-space: pre; }
 .markdown-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .markdown-body th, .markdown-body td { padding: 6px 9px; border: 1px solid var(--line); text-align: left; }
+.markdown-body.is-streaming > :last-child::after { content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 3px; background: var(--accent); vertical-align: text-bottom; animation: caret-blink 1s steps(2, start) infinite; }
+@keyframes caret-blink { to { visibility: hidden; } }
 .message-plain { margin: 0; overflow-wrap: anywhere; color: #e2e8e2; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
 .message-footer { display: flex; min-height: 20px; align-items: center; gap: 12px; margin-top: 8px; }
 .message-time { color: var(--soft); font-family: var(--font-mono); font-size: 9px; }
@@ -217,7 +219,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 2px sol
 .char-count { flex: 0 0 auto; color: var(--soft); font-family: var(--font-mono); font-size: 10px; }
 .char-count-over { color: var(--danger); }
 @media (prefers-reduced-motion: reduce) {
-  .message-row, .jump-latest, .status-dot-busy, .typing-indicator span { animation: none; }
+  .message-row, .jump-latest, .status-dot-busy, .typing-indicator span, .markdown-body.is-streaming > :last-child::after { animation: none; }
 }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 

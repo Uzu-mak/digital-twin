@@ -423,6 +423,7 @@ Local development uses the same interfaces backed by files (`memory/`, `knowledg
 | `GET` | `/health` | Liveness check |
 | `GET` | `/projects` | Public repository directory (no README bodies); cached 5 min at the CDN; **503** if storage is unreachable |
 | `POST` | `/chat` | Grounded conversation |
+| `POST` | `/chat/stream` | Same request as `/chat`; the reply streams as server-sent events (`meta` → `delta`… → `done` / `error`). The web app uses this and falls back to `/chat` |
 
 <details>
 <summary><b>Example: <code>POST /chat</code></b></summary>

@@ -164,6 +164,68 @@ class ApiCompatibilityTests(unittest.TestCase):
         # No failed AI exchange should enter session history.
         self.assertEqual(session.messages, [])
 
+    def test_chat_stream_sends_deltas_and_saves_full_reply(self):
+        import json
+
+        def chunk(text):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=text))]
+            )
+
+        session = new_session()
+
+        with (
+            patch.object(
+                server.client.chat.completions,
+                "create",
+                return_value=iter([chunk("A grounded "), chunk("answer.")]),
+            ) as create_completion,
+            patch.object(server.session_store, "create", return_value=session),
+            patch.object(server.session_store, "save") as save_session,
+        ):
+            response = self.client.post(
+                "/chat/stream",
+                json={"message": "What do I build?"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            response.headers["content-type"].startswith("text/event-stream")
+        )
+
+        events = [
+            (
+                block.split("\n")[0].removeprefix("event: "),
+                json.loads(block.split("\n")[1].removeprefix("data: ")),
+            )
+            for block in response.text.split("\n\n")
+            if block
+        ]
+
+        self.assertEqual(events[0], ("meta", {"session_id": session.session_id}))
+        self.assertEqual(
+            "".join(data["text"] for name, data in events if name == "delta"),
+            "A grounded answer.",
+        )
+        self.assertEqual(events[-1], ("done", {"saved": True}))
+
+        self.assertTrue(create_completion.call_args.kwargs["stream"])
+        save_session.assert_called_once_with(session)
+        self.assertEqual(session.messages[1].content, "A grounded answer.")
+
+    def test_chat_stream_returns_404_for_expired_session_before_streaming(self):
+        with patch.object(server.session_store, "load", return_value=None):
+            response = self.client.post(
+                "/chat/stream",
+                json={
+                    "message": "Hello",
+                    "session_id": "3f6c1b8e-6a1d-4c8e-9a4f-2b7d0c5e9f12",
+                },
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Session not found or expired")
+
     @patch(
         "server.public_directory",
         return_value={
