@@ -207,14 +207,102 @@ class S3KnowledgeStore(KnowledgeStore):
 
 
 # --------------------------------------------------
+# Redis knowledge storage (Vercel / Upstash)
+# --------------------------------------------------
+
+REDIS_KNOWLEDGE_PREFIX = "digital-twin:knowledge:"
+REDIS_KNOWLEDGE_INDEX_KEY = "digital-twin:knowledge:index"
+
+
+class RedisKnowledgeStore(KnowledgeStore):
+    """Persistent document storage for serverless deployments.
+
+    Documents never expire; a sync overwrites them in place. A set of
+    document IDs is kept alongside so list_ids() avoids a key scan.
+    """
+
+    def __init__(self, redis_url, redis_client=None):
+        if redis_client is None:
+            if not redis_url:
+                raise ValueError("Redis URL is required")
+
+            import redis
+
+            redis_client = redis.Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=5,
+                socket_timeout=5,
+            )
+
+        self.client = redis_client
+
+    def _key(self, document_id: str) -> str:
+        digest = document_key(document_id).split("/")[-1]
+        return f"{REDIS_KNOWLEDGE_PREFIX}{digest}"
+
+    def put(self, document: KnowledgeDocument) -> None:
+        key = self._key(document.document_id)
+
+        pipeline = self.client.pipeline()
+        pipeline.set(key, serialize_document(document))
+        pipeline.sadd(
+            REDIS_KNOWLEDGE_INDEX_KEY,
+            document.document_id,
+        )
+        pipeline.execute()
+
+    def get(self, document_id: str) -> KnowledgeDocument | None:
+        data = self.client.get(self._key(document_id))
+
+        if data is None:
+            return None
+
+        document = deserialize_document(data)
+
+        if document.document_id != document_id:
+            raise ValueError("Knowledge document ID mismatch")
+
+        return document
+
+    def list_ids(self) -> list[str]:
+        return sorted(
+            validate_document_id(document_id)
+            for document_id in self.client.smembers(
+                REDIS_KNOWLEDGE_INDEX_KEY
+            )
+        )
+
+
+# --------------------------------------------------
 # Storage factory
 # --------------------------------------------------
 
 def create_knowledge_store() -> KnowledgeStore:
-    use_s3 = os.getenv(
-        "USE_S3",
-        "false",
-    ).lower() == "true"
+    # KNOWLEDGE_STORE_BACKEND selects redis | s3 | local.
+    # When unset, the legacy USE_S3 flag still applies.
+    backend = os.getenv(
+        "KNOWLEDGE_STORE_BACKEND",
+        "",
+    ).strip().lower()
+
+    if backend == "redis":
+        return RedisKnowledgeStore(
+            redis_url=os.getenv("REDIS_URL", "").strip()
+        )
+
+    if backend not in ("", "local", "s3"):
+        raise ValueError(
+            f"Unsupported knowledge storage backend: {backend}"
+        )
+
+    use_s3 = backend == "s3" or (
+        backend == ""
+        and os.getenv(
+            "USE_S3",
+            "false",
+        ).lower() == "true"
+    )
 
     if use_s3:
         return S3KnowledgeStore(

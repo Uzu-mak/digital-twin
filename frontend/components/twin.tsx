@@ -53,17 +53,27 @@ export default function Twin() {
     setInput("");
     setIsLoading(true);
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/chat`, {
+    const postChat = (activeSessionId?: string) =>
+      fetch(`${API_BASE_URL}/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
           message,
-          session_id: sessionId || undefined,
+          session_id: activeSessionId,
         }),
       });
+
+    try {
+      let response = await postChat(sessionId || undefined);
+
+      // Sessions expire after an hour idle. Start a fresh one once
+      // instead of failing every message until the page reloads.
+      if (response.status === 404 && sessionId) {
+        setSessionId("");
+        response = await postChat();
+      }
 
       if (!response.ok) {
         throw new Error(`Chat request failed with status ${response.status}`);
@@ -81,7 +91,7 @@ export default function Twin() {
         throw new Error("The chat API returned an invalid response.");
       }
 
-      if (!sessionId) {
+      if (data.session_id !== sessionId) {
         setSessionId(data.session_id);
       }
 

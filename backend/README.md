@@ -34,7 +34,18 @@ uv run --project backend --directory backend python sync_github.py
 
 The command paginates the configured user's repository list, keeps only repositories explicitly marked public, and reads metadata, languages, the latest commit SHA, README files, and a bounded selection of root/docs Markdown. It does not clone repositories or read arbitrary source files. HTTP(S) links labeled as demos or deployments are retained with their Markdown source URL, file path, and commit revision. Missing optional documentation produces a warning; rate limits and top-level sync failures leave the previous catalog untouched.
 
-The generated `data/github_catalog.json` is written atomically and ignored by Git. The `/projects` response strips documentation bodies and returns public metadata, featured flags, sync time, and validated HTTP(S) links.
+Where the catalog goes depends on `KNOWLEDGE_STORE_BACKEND`. With `local` (the default), the generated `data/github_catalog.json` is written atomically and ignored by Git. With `redis`, the catalog and README content are written to `REDIS_URL` so a serverless deployment can read them; run the sync from your machine with the production `REDIS_URL` in `backend/.env`. Pass `--catalog path.json` to force a local file in either mode. The `/projects` response strips documentation bodies and returns public metadata, featured flags, sync time, and validated HTTP(S) links.
+
+## Vercel deployment
+
+Vercel's filesystem is read-only, so set these environment variables on the backend project:
+
+- `SESSION_STORE_BACKEND=redis` for chat sessions
+- `KNOWLEDGE_STORE_BACKEND=redis` for the GitHub catalog and synced README content
+- `REDIS_URL` for your Redis instance (for example, Upstash)
+- `CORS_ORIGINS` set to the frontend's deployed URL
+
+The `/chat` and `/projects` endpoints both read the catalog from the configured backend.
 
 ## Tests
 

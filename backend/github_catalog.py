@@ -659,6 +659,71 @@ def _sync_repository(
     )
 
 
+
+# --------------------------------------------------
+# Redis GitHub catalog storage
+# --------------------------------------------------
+
+REDIS_CATALOG_KEY = "digital-twin:github:catalog"
+
+
+def _validate_catalog(catalog: Any) -> dict[str, Any]:
+    if (
+        not isinstance(catalog, dict)
+        or not isinstance(catalog.get("repositories"), list)
+    ):
+        raise GitHubSyncError(
+            "The GitHub catalog has an invalid format."
+        )
+
+    return catalog
+
+
+def _redis_catalog_client():
+    redis_url = os.getenv("REDIS_URL", "").strip()
+
+    if not redis_url:
+        raise GitHubSyncError(
+            "Redis catalog storage is not configured."
+        )
+
+    import redis
+
+    return redis.Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_timeout=5,
+    )
+
+
+def _write_redis_catalog(catalog: dict[str, Any]) -> None:
+    validated = _validate_catalog(catalog)
+    client = _redis_catalog_client()
+
+    client.set(
+        REDIS_CATALOG_KEY,
+        json.dumps(validated, ensure_ascii=False),
+    )
+
+
+def _load_redis_catalog() -> dict[str, Any] | None:
+    client = _redis_catalog_client()
+    raw = client.get(REDIS_CATALOG_KEY)
+
+    if raw is None:
+        return None
+
+    try:
+        catalog = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise GitHubSyncError(
+            "The Redis GitHub catalog is invalid."
+        ) from error
+
+    return _validate_catalog(catalog)
+
+
 def _write_catalog(
     path: Path,
     catalog: dict[str, Any],
@@ -743,6 +808,8 @@ def sync_catalog(
         else GitHubClient(token=token)
     )
 
+    explicit_catalog_path = catalog_path is not None
+
     catalog_path = (
         catalog_path
         if catalog_path is not None
@@ -809,11 +876,15 @@ def sync_catalog(
         "warnings": warnings,
     }
 
-    # Publish the catalog only after all store writes.
-    _write_catalog(
-        catalog_path,
-        catalog,
-    )
+    # Publish only after all document writes have succeeded.
+    if (
+        not explicit_catalog_path
+        and os.getenv("KNOWLEDGE_STORE_BACKEND", "local").strip().lower()
+        == "redis"
+    ):
+        _write_redis_catalog(catalog)
+    else:
+        _write_catalog(catalog_path, catalog)
 
     return catalog
 
@@ -821,55 +892,37 @@ def sync_catalog(
 def load_catalog(
     catalog_path: Path | None = None,
 ) -> dict[str, Any]:
-    path = (
-        catalog_path
-        if catalog_path is not None
-        else CATALOG_PATH
-    )
+    empty_catalog = {
+        "schema_version": 1,
+        "username": os.getenv("GITHUB_USERNAME", "Uzu-mak"),
+        "last_synchronized_at": None,
+        "repository_count": 0,
+        "repositories": [],
+        "warnings": [],
+    }
+
+    backend = os.getenv(
+        "KNOWLEDGE_STORE_BACKEND", "local"
+    ).strip().lower()
+
+    # Production Redis mode; explicit paths remain local for tests.
+    if catalog_path is None and backend == "redis":
+        catalog = _load_redis_catalog()
+        return catalog if catalog is not None else empty_catalog
+
+    path = catalog_path if catalog_path is not None else CATALOG_PATH
 
     if not path.is_file():
-        return {
-            "schema_version": 1,
-            "username": os.getenv(
-                "GITHUB_USERNAME",
-                "Uzu-mak",
-            ),
-            "last_synchronized_at": None,
-            "repository_count": 0,
-            "repositories": [],
-            "warnings": [],
-        }
+        return empty_catalog
 
     try:
-        catalog = json.loads(
-            path.read_text(
-                encoding="utf-8"
-            )
-        )
-
-    except (
-        OSError,
-        json.JSONDecodeError,
-    ) as error:
+        catalog = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
         raise GitHubSyncError(
-            "The local GitHub catalog is "
-            "unavailable or invalid."
+            "The local GitHub catalog is unavailable or invalid."
         ) from error
 
-    if (
-        not isinstance(catalog, dict)
-        or not isinstance(
-            catalog.get("repositories"),
-            list,
-        )
-    ):
-        raise GitHubSyncError(
-            "The local GitHub catalog has "
-            "an invalid format."
-        )
-
-    return catalog
-
+    return _validate_catalog(catalog)
 
 def public_directory(
     catalog: dict[str, Any] | None = None,
