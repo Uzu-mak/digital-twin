@@ -1,0 +1,69 @@
+
+# ==========================================
+# DIGITAL TWIN — ROOT .gitignore
+# ==========================================
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+.aws/
+*.pem
+*.key
+credentials
+*.credentials
+
+# Python / FastAPI
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Next.js / Node.js
+node_modules/
+.next/
+out/
+build/
+dist/
+.vercel/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data — do not upload to GitHub
+/knowledge/
+/memory/
+/sessions/
+/backend/data/github_catalog.json
+
+# Excluded project work
+/week2/
+
+# Frontend's original Git repository backup
+/frontend/.git-backup/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# Temporary files
+*.log
+*.tmp
+*.bak

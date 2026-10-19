@@ -1,0 +1,27 @@
+{
+  "full_name": "Jeremiah Afari Opoku-Acheampong",
+  "name": "Jerry",
+  "current_role": "Graduate Practicum Student, Manufacturing AI Decision Support (IntelliAware), Wayne State University",
+  "location": "Auburn, WA",
+  "email": "jeremiahafari70@gmail.com",
+  "linkedin": "linkedin.com/in/jeremiah-opoku-acheampong-b99b40353",
+  "github": "github.com/Uzu-mak",
+  "specialties": [
+    "Retrieval and agent systems (GraphRAG, LangGraph, vector and graph retrieval)",
+    "Backend and full-stack development (FastAPI, PostgreSQL, Next.js, TypeScript)",
+    "Cloud deployment of AI applications (AWS Lambda, Docker, Vercel)"
+  ],
+  "years_experience": 1,
+  "education": [
+    {
+      "degree": "M.S. Data Science and Business Analytics",
+      "institution": "Wayne State University",
+      "year": "2026"
+    },
+    {
+      "degree": "B.S. Computer Science",
+      "institution": "University of Ghana",
+      "year": "2022"
+    }
+  ]
+}
