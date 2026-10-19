@@ -18,53 +18,7 @@ from knowledge_store import (
 )
 from storage import KnowledgeDocument
 
-
-class FakePipeline:
-    def __init__(self, client: "FakeRedis") -> None:
-        self.client = client
-        self.operations: list[tuple] = []
-
-    def set(self, key, value):
-        self.operations.append(("set", key, value))
-        return self
-
-    def sadd(self, key, *values):
-        self.operations.append(("sadd", key, values))
-        return self
-
-    def execute(self):
-        for operation in self.operations:
-            if operation[0] == "set":
-                self.client.set(operation[1], operation[2])
-            else:
-                self.client.sadd(operation[1], *operation[2])
-        self.operations = []
-
-
-class FakeRedis:
-    """In-memory stand-in for the redis-py calls these modules use."""
-
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-        self.sets: dict[str, set[str]] = {}
-
-    def get(self, key):
-        return self.values.get(key)
-
-    def set(self, key, value, ex=None, nx=False):
-        if nx and key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def sadd(self, key, *values):
-        self.sets.setdefault(key, set()).update(values)
-
-    def smembers(self, key):
-        return set(self.sets.get(key, set()))
-
-    def pipeline(self):
-        return FakePipeline(self)
+from fake_redis import FakeRedis
 
 
 def make_document(document_id="github:Uzu-mak/AegisOps:README.md"):
@@ -101,6 +55,29 @@ class RedisKnowledgeStoreTests(unittest.TestCase):
         store.put(make_document())
 
         self.assertEqual(len(client.smembers(REDIS_KNOWLEDGE_INDEX_KEY)), 1)
+
+    def test_delete_removes_document_and_index_entry(self):
+        client = FakeRedis()
+        store = RedisKnowledgeStore(redis_url="", redis_client=client)
+        document = make_document()
+
+        store.put(document)
+        store.delete(document.document_id)
+        store.delete(document.document_id)  # deleting twice is a no-op
+
+        self.assertIsNone(store.get(document.document_id))
+        self.assertEqual(store.list_ids(), [])
+
+    def test_local_delete_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalKnowledgeStore(directory)
+            document = make_document()
+
+            store.put(document)
+            store.delete(document.document_id)
+            store.delete(document.document_id)
+
+            self.assertIsNone(store.get(document.document_id))
 
     def test_requires_url_without_client(self):
         with self.assertRaises(ValueError):

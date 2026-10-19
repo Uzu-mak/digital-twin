@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -11,14 +12,16 @@ from urllib.parse import urlparse
 from openai.types.chat import ChatCompletionMessageParam
 
 if __package__:
-    from .github_catalog import load_catalog, safe_http_url
+    from .github_catalog import GitHubSyncError, load_catalog, safe_http_url
     from .knowledge_store import create_knowledge_store
     from .storage import KnowledgeStore
 else:
-    from github_catalog import load_catalog, safe_http_url
+    from github_catalog import GitHubSyncError, load_catalog, safe_http_url
     from knowledge_store import create_knowledge_store
     from storage import KnowledgeStore
 
+
+logger = logging.getLogger(__name__)
 
 BACKEND_DIR = Path(__file__).resolve().parent
 PROFILE_DATA_DIR = BACKEND_DIR / "data"
@@ -221,16 +224,35 @@ def _document_content(
         if document_id != expected_id:
             return None
 
+        # Current catalogs store each document under a revision-scoped
+        # ID so a new sync never overwrites what readers are using.
+        # Older catalogs have no storage_id and use document_id directly.
+        storage_id = document.get("storage_id", document_id)
+
+        if storage_id != document_id and storage_id != (
+            f"{document_id}@{document.get('revision')}"
+        ):
+            return None
+
         if knowledge_store is None:
             return None
 
-        stored = knowledge_store.get(document_id)
+        try:
+            stored = knowledge_store.get(storage_id)
+        except Exception:
+            # One unreadable document must not fail the whole answer.
+            logger.warning(
+                "Knowledge document %s could not be read.",
+                storage_id,
+                exc_info=True,
+            )
+            return None
 
         if stored is None:
             return None
 
         # Never combine content with mismatched provenance.
-        if stored.document_id != document_id:
+        if stored.document_id != storage_id:
             return None
 
         if stored.source_url != source_url:
@@ -446,11 +468,20 @@ def retrieve_sources(
         profile_data_dir
     )
 
-    local_catalog = (
-        catalog
-        if catalog is not None
-        else load_catalog(catalog_path)
-    )
+    if catalog is not None:
+        local_catalog = catalog
+    else:
+        try:
+            local_catalog = load_catalog(catalog_path)
+        except GitHubSyncError:
+            # Answer from the profile alone rather than failing the chat;
+            # the grounding policy keeps the twin from inventing project
+            # details it has no evidence for.
+            logger.exception(
+                "GitHub catalog unavailable; answering without "
+                "repository evidence."
+            )
+            local_catalog = {"repositories": []}
 
     # Only initialize the configured store when the catalog
     # actually contains persistent document references.

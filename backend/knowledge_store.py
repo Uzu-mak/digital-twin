@@ -109,6 +109,14 @@ class LocalKnowledgeStore(KnowledgeStore):
 
         return document
 
+    def delete(self, document_id: str) -> None:
+        path = self._path(document_id)
+
+        if path.is_symlink():
+            return
+
+        path.unlink(missing_ok=True)
+
     def list_ids(self) -> list[str]:
         ids = []
 
@@ -179,6 +187,12 @@ class S3KnowledgeStore(KnowledgeStore):
             raise ValueError("Knowledge document ID mismatch")
 
         return document
+
+    def delete(self, document_id: str) -> None:
+        self.s3.delete_object(
+            Bucket=self.bucket,
+            Key=document_key(document_id),
+        )
 
     def list_ids(self) -> list[str]:
         ids = []
@@ -264,6 +278,12 @@ class RedisKnowledgeStore(KnowledgeStore):
             raise ValueError("Knowledge document ID mismatch")
 
         return document
+
+    def delete(self, document_id: str) -> None:
+        pipeline = self.client.pipeline()
+        pipeline.delete(self._key(document_id))
+        pipeline.srem(REDIS_KNOWLEDGE_INDEX_KEY, document_id)
+        pipeline.execute()
 
     def list_ids(self) -> list[str]:
         return sorted(

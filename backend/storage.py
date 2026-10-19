@@ -87,3 +87,11 @@ class KnowledgeStore(ABC):
     @abstractmethod
     def list_ids(self) -> list[str]:
         """List stored document identifiers."""
+
+    def delete(self, document_id: str) -> None:
+        """Delete a stored document; deleting a missing one is a no-op.
+
+        Not abstract so existing third-party stores keep working; stale
+        document cleanup is skipped for stores that do not implement it.
+        """
+        raise NotImplementedError

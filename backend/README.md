@@ -22,7 +22,7 @@ Start the frontend in another terminal:
 npm.cmd --prefix frontend run dev
 ```
 
-The API root and `/health` are startup checks. `/chat` retains the existing request (`message`, optional `session_id`) and response (`response`, `session_id`) contract. `/projects` returns public repository metadata and documented links; README bodies remain in the local backend catalog and are not sent to the browser.
+The API root and `/health` are startup checks. `/chat` retains the existing request (`message`, optional `session_id`) and response (`response`, `session_id`) contract. `/projects` returns public repository metadata and documented links; README bodies stay in the knowledge store and are not sent to the browser.
 
 ## GitHub synchronization
 
@@ -35,6 +35,10 @@ uv run --project backend --directory backend python sync_github.py
 The command paginates the configured user's repository list, keeps only repositories explicitly marked public, and reads metadata, languages, the latest commit SHA, README files, and a bounded selection of root/docs Markdown. It does not clone repositories or read arbitrary source files. HTTP(S) links labeled as demos or deployments are retained with their Markdown source URL, file path, and commit revision. Missing optional documentation produces a warning; rate limits and top-level sync failures leave the previous catalog untouched.
 
 Where the catalog goes depends on `KNOWLEDGE_STORE_BACKEND`. With `local` (the default), the generated `data/github_catalog.json` is written atomically and ignored by Git. With `redis`, the catalog and README content are written to `REDIS_URL` so a serverless deployment can read them; run the sync from your machine with the production `REDIS_URL` in `backend/.env`. Pass `--catalog path.json` to force a local file in either mode. The `/projects` response strips documentation bodies and returns public metadata, featured flags, sync time, and validated HTTP(S) links.
+
+## Automatic synchronization
+
+A GitHub Actions workflow (`.github/workflows/sync-github.yml`) runs the sync every 6 hours and on demand, publishing to Redis. See [`docs/github-sync.md`](../docs/github-sync.md) for the architecture, required secrets, status and rollback commands, and troubleshooting.
 
 ## Vercel deployment
 
@@ -49,10 +53,10 @@ The `/chat` and `/projects` endpoints both read the catalog from the configured 
 
 ## Tests
 
-Run focused synchronization tests:
+Run the full backend suite (pytest and boto3 are test-only extras):
 
 ```powershell
-uv run --project backend --directory backend python -m unittest discover -s tests -v
+uv run --project backend --directory backend --with pytest --with boto3 python -m pytest tests -v
 ```
 
 The tests use mocked GitHub responses and do not require a token or network access.
